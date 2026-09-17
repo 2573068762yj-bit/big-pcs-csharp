@@ -1,0 +1,10 @@
+.vs/
+packages/
+**/bin/
+**/obj/
+*.suo
+*.user
+*.bak
+*.pdb
+*.cache
+artifact/
