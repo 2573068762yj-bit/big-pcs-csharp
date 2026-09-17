@@ -1,0 +1,51 @@
+name: 构建旧版 C# 上位机
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: 配置 NuGet
+        uses: NuGet/setup-nuget@v2
+
+      - name: 恢复依赖
+        run: nuget restore PcDebuger.sln -PackagesDirectory packages -NonInteractive
+
+      - name: 构建 Release
+        run: msbuild PcDebuger.sln /m /t:Rebuild /p:Configuration=Release /p:Platform="Any CPU" /p:RestorePackages=false /v:minimal
+
+      - name: 整理构建产物
+        shell: pwsh
+        run: |
+          $output = "PcDebuger/bin/Release"
+          if (-not (Test-Path "$output/PcDebuger.exe")) {
+            throw "未找到 Release EXE：$output/PcDebuger.exe"
+          }
+          New-Item -ItemType Directory -Force -Path artifact | Out-Null
+          Copy-Item "$output/PcDebuger.exe" artifact/
+          Copy-Item "$output/PcDebuger.exe.config" artifact/ -ErrorAction SilentlyContinue
+          Copy-Item "$output/ControlCANFD.dll" artifact/
+          Copy-Item README.md artifact/使用说明.md
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: BigPcs-Debuger-CSharp-win32
+          path: artifact
+          if-no-files-found: error
+          retention-days: 30
