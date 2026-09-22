@@ -27,7 +27,7 @@ jobs:
         run: nuget restore PcDebuger.sln -PackagesDirectory packages -NonInteractive
 
       - name: 构建 Release
-        run: msbuild PcDebuger.sln /m /t:Rebuild /p:Configuration=Release /p:Platform="Any CPU" /p:RestorePackages=false /v:minimal
+        run: msbuild PcDebuger.sln /m /t:Rebuild /p:Configuration=Release /p:Platform="Any CPU" /p:RestorePackages=false /p:FrameworkPathOverride="${{ github.workspace }}\packages\Microsoft.NETFramework.ReferenceAssemblies.net45.1.0.3\build\.NETFramework\v4.5" /v:minimal
 
       - name: 整理构建产物
         shell: pwsh
