@@ -39,7 +39,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path artifact | Out-Null
           Copy-Item "$output/PcDebuger.exe" artifact/
           Copy-Item "$output/PcDebuger.exe.config" artifact/ -ErrorAction SilentlyContinue
-          Copy-Item "$output/ControlCANFD.dll" artifact/
+          Copy-Item "PcDebuger/ControlCANFD.dll" artifact/
           Copy-Item README.md artifact/使用说明.md
 
       - name: 上传构建产物
