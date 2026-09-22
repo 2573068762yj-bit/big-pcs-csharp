@@ -468,8 +468,8 @@ namespace PcDebuger
             // 创建调试文件选择窗口。
             OpenFileDialog dialog = new OpenFileDialog();
 
-            // 每次只导入一个MAP或ELF文件。
-            dialog.Multiselect = false;
+            // 允许同时导入同一固件生成的MAP和ELF文件。
+            dialog.Multiselect = true;
 
             // 提示用户选择包含变量信息的调试文件。
             dialog.Title = "请选择MAP或ELF文件";
@@ -482,19 +482,18 @@ namespace PcDebuger
             {
                 try
                 {
-                    // 保存用户选择的文件路径。
-                    string file = dialog.FileName;
+                    // 展开用户选择，并自动补充同名的MAP或ELF伴随文件。
+                    string[] debugFiles = GetDebugFileList(dialog.FileNames);
 
-                    // 示波器与在线变量共用MAP或ELF解析入口。
-                    mOscVarList = AnalysisDebugFile(file);
+                    // 示波器与在线变量共用MAP和ELF合并解析入口。
+                    string warning;
+                    mOscVarList = AnalysisDebugFiles(debugFiles, out warning);
 
                     // DWARF解析失败时先说明当前只能使用普通ELF符号。
-                    if (!string.IsNullOrEmpty(ElfDwarfParser.LastWarning) &&
-                        string.Equals(Path.GetExtension(file), ".elf",
-                            StringComparison.OrdinalIgnoreCase))
+                    if (!string.IsNullOrEmpty(warning))
                     {
                         MessageBox.Show(
-                            ElfDwarfParser.LastWarning,
+                            warning,
                             "ELF解析提示",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Warning);

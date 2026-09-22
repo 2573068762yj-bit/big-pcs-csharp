@@ -25,6 +25,9 @@ namespace PcDebuger
 
         // 标记该成员是否属于当前协议不能直接读写的位域。
         public bool isBitField;
+
+        // 保存变量来源，便于在选择窗口区分MAP符号和ELF成员。
+        public string source;
     }
 
     public class VarOnlineExtend
@@ -517,8 +520,8 @@ namespace PcDebuger
             // 创建文件选择窗口。
             OpenFileDialog dialog = new OpenFileDialog();
 
-            // 每次只允许导入一个调试文件。
-            dialog.Multiselect = false;
+            // 允许同时选择同一固件生成的MAP和ELF文件。
+            dialog.Multiselect = true;
 
             // 提示用户选择MAP或ELF文件。
             dialog.Title = "请选择MAP或ELF文件";
@@ -531,26 +534,26 @@ namespace PcDebuger
             {
                 try
                 {
-                    // 保存用户选择的完整文件路径。
-                    string file = dialog.FileName;
+                    // 展开用户选择，并自动补充同名的MAP或ELF伴随文件。
+                    string[] debugFiles = GetDebugFileList(dialog.FileNames);
 
-                    // 先解析到临时列表，解析失败时保留上一次有效数据。
-                    List<VarOnline> varList = AnalysisDebugFile(file);
+                    // 同时解析MAP和ELF，并按变量名称与地址合并结果。
+                    string warning;
+                    List<VarOnline> varList = AnalysisDebugFiles(debugFiles, out warning);
 
-                    // DWARF失败但ELF普通符号可用时，先说明回退原因再让用户选择变量。
-                    if (!string.IsNullOrEmpty(ElfDwarfParser.LastWarning) &&
-                        string.Equals(Path.GetExtension(file), ".elf",
-                            StringComparison.OrdinalIgnoreCase))
+                    // 某个ELF的DWARF解析失败时，先显示对应的回退原因。
+                    if (!string.IsNullOrEmpty(warning))
                     {
                         MessageBox.Show(
-                            ElfDwarfParser.LastWarning,
+                            warning,
                             "ELF解析提示",
                             MessageBoxButtons.OK,
                             MessageBoxIcon.Warning);
                     }
 
-                    // 解析成功后再更新路径显示。
-                    textBoxMapDir.Text = file;
+                    // 显示本次实际加载的全部调试文件名称。
+                    textBoxMapDir.Text = string.Join("; ",
+                        debugFiles.Select(item => Path.GetFileName(item)).ToArray());
 
                     // 使用新的变量列表替换旧列表。
                     mVarList = varList;
@@ -596,6 +599,173 @@ namespace PcDebuger
 
             // 其他扩展名不属于当前功能范围。
             throw new NotSupportedException("不支持的文件格式：" + extension);
+        }
+
+        private string[] GetDebugFileList(string[] selectedFiles)
+        {
+            // 使用不区分大小写的集合避免同一文件被重复加入。
+            HashSet<string> fileSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            // 逐个处理用户选择的文件。
+            foreach (string selectedFile in selectedFiles)
+            {
+                // 保存规范化后的完整路径。
+                string fullPath = Path.GetFullPath(selectedFile);
+                fileSet.Add(fullPath);
+
+                // 取得当前文件扩展名。
+                string extension = Path.GetExtension(fullPath);
+
+                // 选择MAP时自动寻找同名ELF文件。
+                if (string.Equals(extension, ".map", StringComparison.OrdinalIgnoreCase))
+                {
+                    string elfPath = Path.ChangeExtension(fullPath, ".elf");
+
+                    if (File.Exists(elfPath))
+                    {
+                        fileSet.Add(elfPath);
+                    }
+                }
+
+                // 选择ELF时自动寻找同名MAP文件。
+                if (string.Equals(extension, ".elf", StringComparison.OrdinalIgnoreCase))
+                {
+                    string mapPath = Path.ChangeExtension(fullPath, ".map");
+
+                    if (File.Exists(mapPath))
+                    {
+                        fileSet.Add(mapPath);
+                    }
+                }
+            }
+
+            // 先解析MAP，再解析ELF，使ELF中的可靠类型覆盖同名MAP变量。
+            List<string> fileList = fileSet.ToList();
+            fileList.Sort(delegate(string left, string right)
+            {
+                int leftPriority = string.Equals(Path.GetExtension(left), ".map",
+                    StringComparison.OrdinalIgnoreCase) ? 0 : 1;
+                int rightPriority = string.Equals(Path.GetExtension(right), ".map",
+                    StringComparison.OrdinalIgnoreCase) ? 0 : 1;
+
+                if (leftPriority != rightPriority)
+                {
+                    return leftPriority.CompareTo(rightPriority);
+                }
+
+                return string.Compare(left, right, StringComparison.OrdinalIgnoreCase);
+            });
+
+            // 返回最终需要解析的文件列表。
+            return fileList.ToArray();
+        }
+
+        private List<VarOnline> AnalysisDebugFiles(string[] paths, out string warning)
+        {
+            // 使用变量完整名称和地址作为合并键。
+            Dictionary<string, VarOnline> varMap =
+                new Dictionary<string, VarOnline>(StringComparer.OrdinalIgnoreCase);
+
+            // 收集所有ELF解析过程中产生的非致命警告。
+            List<string> warningList = new List<string>();
+
+            // 保存MAP根变量的合并键，后续需要排除已经被ELF展开的复合对象。
+            List<string> mapVarKeyList = new List<string>();
+
+            // 保存ELF解析出的全部标量叶子路径。
+            List<VarOnline> elfVarList = new List<VarOnline>();
+
+            // 依次解析MAP和ELF文件。
+            foreach (string path in paths)
+            {
+                // 解析当前文件中的变量。
+                List<VarOnline> fileVarList = AnalysisDebugFile(path);
+
+                // ELF解析器会通过LastWarning报告DWARF回退原因。
+                if (string.Equals(Path.GetExtension(path), ".elf",
+                    StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrEmpty(ElfDwarfParser.LastWarning))
+                {
+                    warningList.Add(Path.GetFileName(path) + "：" +
+                        ElfDwarfParser.LastWarning);
+                }
+
+                // 将当前文件的变量合并到统一列表。
+                foreach (VarOnline varItem in fileVarList)
+                {
+                    // 地址统一转为大写，避免同一地址因大小写不同而重复。
+                    string varKey = varItem.name + "@" +
+                        (varItem.addr ?? string.Empty).ToUpperInvariant();
+
+                    // 文件列表已经按照MAP在前、ELF在后排序，因此ELF会自然覆盖同名项。
+                    varMap[varKey] = varItem;
+
+                    // 分别记录MAP根符号和ELF叶子成员。
+                    if (string.Equals(varItem.source, "MAP",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        mapVarKeyList.Add(varKey);
+                    }
+                    else if (string.Equals(varItem.source, "ELF",
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        elfVarList.Add(varItem);
+                    }
+                }
+            }
+
+            // MAP无法判断一个符号是标量还是结构体，因此需要使用ELF展开结果纠正。
+            foreach (string mapVarKey in mapVarKeyList)
+            {
+                // 同名项已经被ELF普通标量覆盖时不需要处理。
+                if (!varMap.ContainsKey(mapVarKey) ||
+                    !string.Equals(varMap[mapVarKey].source, "MAP",
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                // 取得MAP根变量名称。
+                string mapVarName = varMap[mapVarKey].name;
+
+                // 标记ELF是否已经把该根变量展开成成员或数组元素。
+                bool isExpandedByElf = false;
+
+                // 只要存在“根变量.成员”或“根变量[索引]”，MAP根项就不能按Uint16读取。
+                foreach (VarOnline elfVar in elfVarList)
+                {
+                    if (elfVar.name.StartsWith(mapVarName + ".",
+                            StringComparison.Ordinal) ||
+                        elfVar.name.StartsWith(mapVarName + "[",
+                            StringComparison.Ordinal))
+                    {
+                        isExpandedByElf = true;
+                        break;
+                    }
+                }
+
+                // 删除无法安全直接读取的结构体或数组根项，只保留ELF标量叶子。
+                if (isExpandedByElf)
+                {
+                    varMap.Remove(mapVarKey);
+                }
+            }
+
+            // 组合需要显示给用户的警告文本。
+            warning = string.Join("\r\n", warningList.ToArray());
+
+            // 将合并结果转换为列表。
+            List<VarOnline> result = varMap.Values.ToList();
+
+            // 按完整变量路径排序，方便后续搜索和浏览。
+            result.Sort(delegate(VarOnline left, VarOnline right)
+            {
+                return string.Compare(left.name, right.name,
+                    StringComparison.CurrentCultureIgnoreCase);
+            });
+
+            // 返回MAP和ELF的统一变量集合。
+            return result;
         }
 
         private List<VarOnline> AnalysisMapFile(string path)
@@ -664,6 +834,9 @@ namespace PcDebuger
                             // MAP解析不会生成位域子成员。
                             varItem.isBitField = false;
 
+                            // 记录变量来自MAP文件。
+                            varItem.source = "MAP";
+
                             // 将变量加入结果列表。
                             varList.Add(varItem);
 
@@ -693,6 +866,9 @@ namespace PcDebuger
 
                         // MAP解析不会生成位域子成员。
                         varItem.isBitField = false;
+
+                        // 记录变量来自MAP文件。
+                        varItem.source = "MAP";
 
                         // 将变量加入结果列表。
                         varList.Add(varItem);

@@ -236,6 +236,11 @@ namespace PcDebuger
                 // Section 类型用于识别符号表、字符串表和 DWARF 数据段。
                 section.type = reader.ReadUInt32(ToInt32(itemOffset + 4));
 
+                // Section flags 用于区分可写变量段和只读常量段。
+                section.flags = is64Bit
+                    ? reader.ReadUInt64(ToInt32(itemOffset + 8))
+                    : reader.ReadUInt32(ToInt32(itemOffset + 8));
+
                 if (is64Bit)
                 {
                     // ELF64 的虚拟地址位于 Section Header 的第 16 字节。
@@ -373,6 +378,22 @@ namespace PcDebuger
                         continue;
                     }
 
+                    // 特殊Section索引不能定位到一个真实的可写数据段。
+                    if (ownerSectionIndex >= elfFile.sectionList.Count)
+                    {
+                        continue;
+                    }
+
+                    // 取得符号真正所属的Section。
+                    ElfSection ownerSection = elfFile.sectionList[ownerSectionIndex];
+
+                    // 当前RA工程的运行变量位于0x20000000到0x3FFFFFFF的RAM地址范围。
+                    // 这里不能只依赖SHF_WRITE，因为实际Renesas ELF的.data段flags为0x6。
+                    if (symbolAddress < 0x20000000UL || symbolAddress >= 0x40000000UL)
+                    {
+                        continue;
+                    }
+
                     // 地址零不是可供上位机在线读取的有效 MCU 变量地址。
                     if (symbolAddress == 0 || symbolAddress > UInt32.MaxValue)
                     {
@@ -398,9 +419,7 @@ namespace PcDebuger
                     symbol.size = symbolSize <= UInt32.MaxValue ? (uint)symbolSize : 0;
 
                     // 保存符号所属段名称，便于后续调试和扩展。
-                    symbol.section = ownerSectionIndex < elfFile.sectionList.Count
-                        ? elfFile.sectionList[ownerSectionIndex].name
-                        : string.Empty;
+                    symbol.section = ownerSection.name;
 
                     // 名称与地址共同组成符号唯一键。
                     string symbolKey = symbol.name + "@" + symbol.addr.ToString("X8");
@@ -1142,6 +1161,9 @@ namespace PcDebuger
             // 普通 ELF 符号不按位域处理。
             varItem.isBitField = false;
 
+            // 记录变量来自ELF符号表。
+            varItem.source = "ELF";
+
             // 将变量加入结果列表。
             varList.Add(varItem);
         }
@@ -1447,6 +1469,9 @@ namespace PcDebuger
 
             // 位域不能使用现有 address + type 协议直接读写。
             varItem.isBitField = inheritedBitField;
+
+            // 记录变量来自ELF中的DWARF调试信息。
+            varItem.source = "ELF";
 
             // 将叶子变量加入结果列表。
             varList.Add(varItem);
@@ -2312,6 +2337,7 @@ namespace PcDebuger
             public uint nameOffset;
             public string name;
             public uint type;
+            public ulong flags;
             public ulong address;
             public ulong offset;
             public ulong size;
