@@ -163,14 +163,18 @@ namespace PcDebuger
             DataGridViewTextBoxColumn infoColumn = new DataGridViewTextBoxColumn();
             infoColumn.Name = "ResidentVarInfo";
             infoColumn.FillWeight = 86F;
+            infoColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill;
             infoColumn.DefaultCellStyle.WrapMode = DataGridViewTriState.True;
             mResidentVarGrid.Columns.Add(infoColumn);
 
             // 第二列显示添加按钮或已添加状态。
             DataGridViewButtonColumn addColumn = new DataGridViewButtonColumn();
             addColumn.Name = "ResidentVarAdd";
-            addColumn.FillWeight = 14F;
+            addColumn.AutoSizeMode = DataGridViewAutoSizeColumnMode.None;
+            addColumn.Width = 42;
             addColumn.FlatStyle = FlatStyle.Flat;
+            addColumn.DefaultCellStyle.ForeColor = Color.FromArgb(7, 137, 139);
+            addColumn.DefaultCellStyle.SelectionForeColor = Color.FromArgb(7, 137, 139);
             mResidentVarGrid.Columns.Add(addColumn);
 
             // 把左侧控件加入布局。

@@ -45,6 +45,10 @@ namespace PcDebuger
             InitBackupBoxDebugerView();
             InitVarDebugOnlineView();
 
+            // 所有业务控件和原有事件初始化完成后，再应用现代工作台布局与主题。
+            // 该步骤只调整WinForms表现层，不修改通信、协议或变量调试核心逻辑。
+            InitModernUi();
+
             mSerialBufferThread = new SerialBufferThread(this);
 
             mIsSendPeriod = false;
