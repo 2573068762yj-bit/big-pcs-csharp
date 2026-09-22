@@ -109,7 +109,7 @@ namespace PcDebuger
         private double[] mPcsTestDataBuf;
         private byte[] mChannelDataType;
 
-        private List<VarOnline> mOscVarList; // 从map文件中读出来的所有的变量和地址
+        private List<VarOnline> mOscVarList; // 从MAP或ELF文件中读出来的所有变量和地址
         private List<VarOnlineExtend> mOscVarListExt;  //  变量读写界面中所有的变量
 		
         private SignalObj[] mSignalTbl = new SignalObj[]{
@@ -465,31 +465,77 @@ namespace PcDebuger
      
         void btnImportSignalCfg_Click(object sender, EventArgs e)
         {
+            // 创建调试文件选择窗口。
             OpenFileDialog dialog = new OpenFileDialog();
-            dialog.Multiselect = false;//该值确定是否可以选择多个文件
-            dialog.Title = "请选择文件夹";
-            dialog.Filter = "所有文件(*.map)|*.map";
+
+            // 每次只导入一个MAP或ELF文件。
+            dialog.Multiselect = false;
+
+            // 提示用户选择包含变量信息的调试文件。
+            dialog.Title = "请选择MAP或ELF文件";
+
+            // 与在线变量界面使用相同的文件类型范围。
+            dialog.Filter = "调试文件(*.map;*.elf)|*.map;*.elf|MAP文件(*.map)|*.map|ELF文件(*.elf)|*.elf";
+
+            // 用户确认选择后才执行解析。
             if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
             {
-                string file = dialog.FileName;
-                //textBoxMapDir.Text = file;
-
-                mOscVarList = AnalysisMapFile(file);
-                List<VarOnlineExtend> varListSelected = GetVarList(mOscVarList);
-                if (varListSelected.Count == 0)
+                try
                 {
-                    MessageBox.Show("没有选择任何变量！");
-                    return;
-                }
-                else if (varListSelected.Count > 10)  //  根据需要调整
-                {
-                    MessageBox.Show("选择的变量太多！");
-                    return;
-                }
+                    // 保存用户选择的文件路径。
+                    string file = dialog.FileName;
 
-                mOscVarListExt.Clear();
-                mOscVarListExt.AddRange(varListSelected);
-                UpdateWaveSignalComboxList(mOscVarListExt);
+                    // 示波器与在线变量共用MAP或ELF解析入口。
+                    mOscVarList = AnalysisDebugFile(file);
+
+                    // DWARF解析失败时先说明当前只能使用普通ELF符号。
+                    if (!string.IsNullOrEmpty(ElfDwarfParser.LastWarning) &&
+                        string.Equals(Path.GetExtension(file), ".elf",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        MessageBox.Show(
+                            ElfDwarfParser.LastWarning,
+                            "ELF解析提示",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                    }
+
+                    // 打开变量选择窗口。
+                    List<VarOnlineExtend> varListSelected = GetVarList(mOscVarList);
+
+                    // 示波器必须至少选择一个变量。
+                    if (varListSelected.Count == 0)
+                    {
+                        MessageBox.Show("没有选择任何变量！");
+                        return;
+                    }
+
+                    // 保留原工程最多选择10个候选信号的限制。
+                    if (varListSelected.Count > 10)
+                    {
+                        MessageBox.Show("选择的变量太多！");
+                        return;
+                    }
+
+                    // 清除之前导入的示波器候选变量。
+                    mOscVarListExt.Clear();
+
+                    // 保存本次选择的变量。
+                    mOscVarListExt.AddRange(varListSelected);
+
+                    // 刷新四个示波器通道的信号下拉框。
+                    UpdateWaveSignalComboxList(mOscVarListExt);
+
+                }
+                catch (Exception ex)
+                {
+                    // 显示文件读取或解析错误，避免异常终止程序。
+                    MessageBox.Show(
+                        "解析调试文件失败！\r\n" + ex.Message,
+                        "文件解析",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
             }
         }
         

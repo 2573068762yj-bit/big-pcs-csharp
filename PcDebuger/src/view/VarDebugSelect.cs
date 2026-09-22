@@ -12,7 +12,7 @@ namespace PcDebuger
 {
     public partial class VarDebugSelect : Form
     {
-        private List<VarOnline> mVarList;  // map文件中所有的变量列表
+        private List<VarOnline> mVarList;  // MAP或ELF文件中所有的变量列表
         public List<VarOnlineExtend> mVarListExt;  //  每次选中的变量列表
 
         public VarDebugSelect()
@@ -49,6 +49,9 @@ namespace PcDebuger
                 newRow.Cells[1].Value = va.name;       // 第2列（下拉框）
                 newRow.Cells[2].Value = va.addr;       // 第3列（地址）
 
+                // 将完整变量对象绑定到表格行，排序后仍能取得正确的类型和位域信息。
+                newRow.Tag = va;
+
                 // 3. 最后把这行添加到网格
                 dataGridView2.Rows.Add(newRow);
             }
@@ -67,6 +70,31 @@ namespace PcDebuger
                 varRow.isSelected = Convert.ToBoolean(row.Cells[0].Value ?? false);
                 if (varRow.isSelected)
                 {
+                    // 优先从表格行中取得绑定的完整变量对象。
+                    VarOnline selectedVar = row.Tag as VarOnline;
+
+                    // 兼容没有绑定Tag的旧表格行，再按行号尝试读取。
+                    if (selectedVar == null &&
+                        row.Index >= 0 && row.Index < mVarList.Count)
+                    {
+                        selectedVar = mVarList[row.Index];
+                    }
+
+                    // 理论上每一行都应该对应一个变量，这里增加保护避免异常。
+                    if (selectedVar == null)
+                    {
+                        continue;
+                    }
+
+                    // 位域只有字节地址还不够，现有协议无法携带位偏移和位宽。
+                    if (selectedVar.isBitField)
+                    {
+                        MessageBox.Show(
+                            selectedVar.name + "是位域成员，当前通信协议不能直接读写！");
+                        continue;
+                    }
+
+                    // 保存界面中显示的完整变量路径。
                     varRow.name = row.Cells[1].Value.ToString();
 
                     //  获取地址
@@ -91,8 +119,10 @@ namespace PcDebuger
                     //}
                     //varRow.addr = (uint)((addrBytes[0] << 24) + (addrBytes[1] << 16) + (addrBytes[2] << 8) + (addrBytes[3]));
 
-                    //  获取数据类型
-                    varRow.type = "Uint16";
+                    // ELF变量使用DWARF自动识别的类型，MAP变量仍然默认Uint16。
+                    varRow.type = string.IsNullOrEmpty(selectedVar.type)
+                        ? "Uint16"
+                        : selectedVar.type;
                     //DataGridViewComboBoxCell comboCell = dataGridView2.CurrentRow.Cells[3] as DataGridViewComboBoxCell;
 
                     //if (comboCell == null)

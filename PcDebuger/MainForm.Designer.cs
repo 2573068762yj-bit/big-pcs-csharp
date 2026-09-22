@@ -10208,7 +10208,7 @@
             this.label343.Name = "label343";
             this.label343.Size = new System.Drawing.Size(71, 12);
             this.label343.TabIndex = 58;
-            this.label343.Text = "map文件路径";
+            this.label343.Text = "调试文件路径";
             // 
             // btnOpenMap
             // 

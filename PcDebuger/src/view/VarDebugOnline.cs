@@ -11,8 +11,20 @@ namespace PcDebuger
 {
     public class VarOnline
     {
+        // 保存变量或结构体叶子成员的完整名称。
         public string name;
+
+        // 保存可以直接发送给下位机的十六进制地址字符串。
         public string addr;
+
+        // 保存当前协议使用的数据类型名称。
+        public string type;
+
+        // 保存 ELF/DWARF 中记录的变量字节数。
+        public uint size;
+
+        // 标记该成员是否属于当前协议不能直接读写的位域。
+        public bool isBitField;
     }
 
     public class VarOnlineExtend
@@ -35,7 +47,7 @@ namespace PcDebuger
     
     partial class MainForm
     {
-        private List<VarOnline> mVarList; // 从map文件中读出来的所有的变量和地址
+        private List<VarOnline> mVarList; // 从MAP或ELF文件中读出来的所有变量和地址
         private List<VarOnlineExtend> mVarListExt;  //  变量读写界面中所有的变量
         private ReadType mReadType;
         private uint mReadPeriod;
@@ -502,21 +514,88 @@ namespace PcDebuger
 
         void btnOpenMap_Click(object sender, EventArgs e)
         {
+            // 创建文件选择窗口。
             OpenFileDialog dialog = new OpenFileDialog();
-            dialog.Multiselect = false;//该值确定是否可以选择多个文件
-            dialog.Title = "请选择文件夹";
-            dialog.Filter = "所有文件(*.map)|*.map";
+
+            // 每次只允许导入一个调试文件。
+            dialog.Multiselect = false;
+
+            // 提示用户选择MAP或ELF文件。
+            dialog.Title = "请选择MAP或ELF文件";
+
+            // 当前功能只支持MAP和ELF，不额外加入AXF格式。
+            dialog.Filter = "调试文件(*.map;*.elf)|*.map;*.elf|MAP文件(*.map)|*.map|ELF文件(*.elf)|*.elf";
+
+            // 只有用户确认选择后才开始解析。
             if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
             {
-                string file = dialog.FileName;
-                textBoxMapDir.Text = file;
+                try
+                {
+                    // 保存用户选择的完整文件路径。
+                    string file = dialog.FileName;
 
-                mVarList = AnalysisMapFile(file);
+                    // 先解析到临时列表，解析失败时保留上一次有效数据。
+                    List<VarOnline> varList = AnalysisDebugFile(file);
 
-                mVarListExt.Clear();
-                mVarListExt.AddRange(GetVarList(mVarList));
-                UpdateVarSelectWin();
+                    // DWARF失败但ELF普通符号可用时，先说明回退原因再让用户选择变量。
+                    if (!string.IsNullOrEmpty(ElfDwarfParser.LastWarning) &&
+                        string.Equals(Path.GetExtension(file), ".elf",
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        MessageBox.Show(
+                            ElfDwarfParser.LastWarning,
+                            "ELF解析提示",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                    }
+
+                    // 解析成功后再更新路径显示。
+                    textBoxMapDir.Text = file;
+
+                    // 使用新的变量列表替换旧列表。
+                    mVarList = varList;
+
+                    // 文件切换后清除之前选中的变量。
+                    mVarListExt.Clear();
+
+                    // 打开变量选择窗口，并加入本次选中的变量。
+                    mVarListExt.AddRange(GetVarList(mVarList));
+
+                    // 刷新在线变量表格。
+                    UpdateVarSelectWin();
+
+                }
+                catch (Exception ex)
+                {
+                    // 将文件格式或读取错误显示给用户，避免程序直接退出。
+                    MessageBox.Show(
+                        "解析调试文件失败！\r\n" + ex.Message,
+                        "文件解析",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                }
             }
+        }
+
+        private List<VarOnline> AnalysisDebugFile(string path)
+        {
+            // 取得文件扩展名，并使用不区分大小写的方式判断。
+            string extension = Path.GetExtension(path);
+
+            // MAP文件继续使用原有的文本解析逻辑。
+            if (string.Equals(extension, ".map", StringComparison.OrdinalIgnoreCase))
+            {
+                return AnalysisMapFile(path);
+            }
+
+            // ELF文件使用新增的ELF和DWARF解析器。
+            if (string.Equals(extension, ".elf", StringComparison.OrdinalIgnoreCase))
+            {
+                return ElfDwarfParser.AnalysisElfFile(path);
+            }
+
+            // 其他扩展名不属于当前功能范围。
+            throw new NotSupportedException("不支持的文件格式：" + extension);
         }
 
         private List<VarOnline> AnalysisMapFile(string path)
@@ -526,9 +605,6 @@ namespace PcDebuger
 
             // 读取所有行（自动处理编码）
             List<string> allLines = File.ReadAllLines(filePath).ToList();
-
-            mVarList.Clear();
-            ClearDataGridView();
 
             for (int i = 0; i < allLines.Count; )
             {
@@ -558,17 +634,38 @@ namespace PcDebuger
 
                 if (parts.Length == 1)
                 {
+                    // 变量名和地址分行保存时，需要确保下一行确实存在。
+                    if (i >= allLines.Count)
+                    {
+                        break;
+                    }
+
                     line = allLines[i++].Trim();  // 如果只有1个变量名，则去下一行查找地址
                     if (line.StartsWith("0x"))
                     {
                         parts = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                         if (parts[0] != "0x00000000")
                         {
-                            VarOnline var = new VarOnline();
+                            // 创建一个从MAP文件读取到的普通变量。
+                            VarOnline varItem = new VarOnline();
 
-                            var.addr = parts[0];          // 第一个：地址
-                            var.name = afterData;          // 第二个：变量名
-                            varList.Add(var);
+                            // MAP地址位于下一行的第一个字段。
+                            varItem.addr = parts[0];
+
+                            // MAP变量名称来自.data.或.bss.之后的文本。
+                            varItem.name = afterData;
+
+                            // MAP不包含可靠类型信息，因此沿用原工程默认Uint16。
+                            varItem.type = "Uint16";
+
+                            // MAP当前没有解析变量字节数，零表示未知。
+                            varItem.size = 0;
+
+                            // MAP解析不会生成位域子成员。
+                            varItem.isBitField = false;
+
+                            // 将变量加入结果列表。
+                            varList.Add(varItem);
 
                             //LogMsg(varName + " " + varAddr + "\r\n");
                         }
@@ -579,10 +676,26 @@ namespace PcDebuger
                     //  如果本行有多个子串，且第2个子串是0x开头，且不为0x00000000，则第1个为变量名，第2个为地址
                     if (parts[1].StartsWith("0x") && parts[1] != "0x00000000")  
                     {
-                        VarOnline var = new VarOnline();
-                        var.addr = parts[1];
-                        var.name = parts[0];
-                        varList.Add(var);
+                        // 创建一个名称和地址位于同一行的MAP变量。
+                        VarOnline varItem = new VarOnline();
+
+                        // 第二个字段是变量地址。
+                        varItem.addr = parts[1];
+
+                        // 第一个字段是变量名称。
+                        varItem.name = parts[0];
+
+                        // MAP不包含可靠类型信息，因此沿用原工程默认Uint16。
+                        varItem.type = "Uint16";
+
+                        // MAP当前没有解析变量字节数，零表示未知。
+                        varItem.size = 0;
+
+                        // MAP解析不会生成位域子成员。
+                        varItem.isBitField = false;
+
+                        // 将变量加入结果列表。
+                        varList.Add(varItem);
                         //LogMsg(varName + " " + varAddr + "\r\n");
                     }
                 }
