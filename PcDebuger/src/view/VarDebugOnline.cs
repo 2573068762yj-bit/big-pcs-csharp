@@ -6,6 +6,8 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.IO;
 using System.Threading;
+using System.Drawing;
+using System.Xml.Serialization;
 
 namespace PcDebuger
 {
@@ -39,6 +41,50 @@ namespace PcDebuger
         public string type;
         public string rdValue;
         public string wrValue;
+
+        // 保存调试文件中的原始类型，用于新ELF载入后的严格身份匹配。
+        public string debugType;
+
+        // 保存调试文件中的变量大小，用于避免同名但布局已经变化的变量误匹配。
+        public uint size;
+
+        // 标记该变量是否已经在当前ELF/MAP中重新匹配成功。
+        public bool resolved;
+    }
+
+    /// <summary>
+    /// 保存变量调试页需要跨软件启动保留的内容。
+    /// 使用公开字段是为了兼容.NET Framework 4.5自带的XmlSerializer。
+    /// </summary>
+    [Serializable]
+    public class VarDebugOnlineConfig
+    {
+        // 保存用户最后一次选择的Debug构建目录。
+        public string debugDirectory;
+
+        // 保存用户已经添加到右侧在线变量表中的变量。
+        public List<VarOnlineExtend> variables;
+
+        public VarDebugOnlineConfig()
+        {
+            // XML反序列化和首次启动都需要一个非空列表。
+            variables = new List<VarOnlineExtend>();
+        }
+    }
+
+    /// <summary>
+    /// 保存一次后台目录扫描的完整结果，便于安全地切回UI线程更新控件。
+    /// </summary>
+    internal class VarDebugDirectoryScanResult
+    {
+        // 保存本次实际解析的ELF和MAP文件。
+        public string[] files;
+
+        // 保存解析得到的全部可读取变量。
+        public List<VarOnline> variables;
+
+        // 保存ELF/DWARF解析器产生的非致命提示。
+        public string warning;
     }
 
     public enum ReadType : byte
@@ -58,6 +104,57 @@ namespace PcDebuger
         private ushort CMD_READ_DEBUG_VAR = 0x2A91;
         private ushort CMD_WRITE_DEBUG_VAR = 0x2B91;
         private ushort CMD_WRITE_DEBUG_CFG = 0x2B90;
+
+        // 左侧常驻变量浏览区一次最多创建的行数，防止大型ELF使界面卡顿。
+        private const int MAX_RESIDENT_VAR_COUNT = 1500;
+
+        // 保存当前选择的Debug构建目录。
+        private string mDebugDirectory;
+
+        // 每两秒检查一次最新ELF的路径、大小和修改时间，逻辑与Rust版一致。
+        private System.Windows.Forms.Timer mDebugFileChangedTimer;
+
+        // 标记后台是否正在解析调试文件，避免同时启动多个DWARF解析任务。
+        private bool mIsDebugDirectoryScanning;
+
+        // 扫描期间再次收到文件变化时，记录完成后还需要重新扫描一次。
+        private bool mIsDebugDirectoryScanPending;
+
+        // 保存当前已经解析的主调试文件路径。
+        private string mLoadedDebugImagePath;
+
+        // 保存当前已经解析的主调试文件修改时间。
+        private DateTime mLoadedDebugImageWriteTimeUtc;
+
+        // 保存当前已经解析的主调试文件大小，辅助识别同一秒内的重新构建。
+        private long mLoadedDebugImageLength;
+
+        // 自动更新地址前如果正在轮询，完成重绑定后需要恢复轮询。
+        private bool mResumePollingAfterDebugScan;
+
+        // 保存左侧变量浏览区使用的分栏控件。
+        private SplitContainer mVarDebugSplitContainer;
+
+        // 保存左侧变量搜索输入框。
+        private TextBox mResidentVarSearchTextBox;
+
+        // 保存左侧来源筛选框，可查看全部、ELF或MAP变量。
+        private ComboBox mResidentVarSourceComboBox;
+
+        // 保存左侧搜索结果表格。
+        private DataGridView mResidentVarGrid;
+
+        // 保存目录扫描状态、变量数量和地址更新数量。
+        private Label mResidentVarStatusLabel;
+
+        // 保存左侧变量树中由用户手工展开的结构体和数组节点。
+        private HashSet<string> mExpandedResidentVarNodeSet;
+
+        // 保存最近一次成功扫描摘要，搜索条件清空后用于恢复状态提示。
+        private string mDebugScanSummary;
+
+        // 分支行共用同一个粗体字体，避免每次搜索都创建大量字体对象。
+        private Font mResidentVarBranchFont;
 
         private void InitVarDebugOnlineView()
         {
@@ -81,33 +178,72 @@ namespace PcDebuger
             mVarListExt = new List<VarOnlineExtend>();
 
             mReadPollingStarted = false;
+
+            // 将原来的弹窗选择方式改为左侧常驻搜索和添加区域。
+            InitResidentVarDebugView();
+
+            // 载入上次关闭软件时保存的Debug目录和在线变量。
+            LoadVarDebugOnlineConfig();
+
+            // 先恢复右侧变量表，即使Debug文件暂时不存在也不会丢失用户配置。
+            UpdateVarSelectWin();
+
+            // 软件关闭前再次保存界面中的最新变量设置。
+            this.FormClosing += MainForm_VarDebugOnlineFormClosing;
+
+            // 已保存的Debug目录仍然有效时，启动监视并立即解析一次。
+            if (!string.IsNullOrEmpty(mDebugDirectory) &&
+                Directory.Exists(mDebugDirectory))
+            {
+                ConfigureDebugDirectoryWatcher();
+                StartDebugDirectoryScan(false);
+            }
         }
 
         private void dataGridView1_CellEndEdit(object sender, DataGridViewCellEventArgs e)
         {
             int row = e.RowIndex;
             int clm = e.ColumnIndex;
+
+            // 表头、空行或模型范围外的行不能继续处理。
+            if (row < 0 || row >= mVarListExt.Count)
+            {
+                return;
+            }
+
             if (clm == 1 || clm == 2)
             {
                 DataGridViewRow datRow = dataGridView1.Rows[row];
-                string varAddr = datRow.Cells[1].Value.ToString();
-                string selectedVarType = datRow.Cells[2].Value.ToString();
+                string varAddr = Convert.ToString(datRow.Cells[1].Value);
+                string selectedVarType = Convert.ToString(datRow.Cells[2].Value);
 
                 mVarListExt[row].addr = varAddr;
                 mVarListExt[row].type = selectedVarType;
                 var item = mVarListExt[row];
-                byte[] cmd = VarDebugOnlineMakeSetAddrCmd(item, (byte)row);
-                CommSendCmd(cmd);
+
+                // 只有当前ELF重新匹配成功后才允许把地址配置给下位机。
+                if (item.resolved)
+                {
+                    byte[] cmd = VarDebugOnlineMakeSetAddrCmd(item, (byte)row);
+                    CommSendCmd(cmd);
+                }
             }
             else if (clm == 4)
             {
                 DataGridViewRow datRow = dataGridView1.Rows[row];
-                string wrValue = datRow.Cells[clm].Value.ToString();
+                string wrValue = Convert.ToString(datRow.Cells[clm].Value);
                 mVarListExt[row].wrValue = wrValue;
                 var item = mVarListExt[row];
-                byte[] cmd = VarDebugOnlineMakeWriteCmd(item, (byte)row);
-                CommSendCmd(cmd);
+
+                if (item.resolved)
+                {
+                    byte[] cmd = VarDebugOnlineMakeWriteCmd(item, (byte)row);
+                    CommSendCmd(cmd);
+                }
             }
+
+            // 每次编辑后立即保存，异常关闭时也能尽量保留用户设置。
+            SaveVarDebugOnlineConfig();
         }
 
         private byte VarDebugOnlineGetDatLen(byte type)
@@ -171,6 +307,13 @@ namespace PcDebuger
                 {
                     return;
                 }
+
+                // ELF更新期间或变量未匹配时，丢弃可能属于旧地址的迟到应答。
+                if (!mVarListExt[chNum].resolved)
+                {
+                    return;
+                }
+
                 if (addr == VarDebugOnlineGetAddr(mVarListExt[chNum].addr))
                 {
                     mVarListExt[chNum].rdValue = value.ToString();
@@ -210,6 +353,13 @@ namespace PcDebuger
 
         private void btnReadVar_Click(object sender, EventArgs e)
         {
+            // 没有在当前ELF中匹配成功的变量时，禁止启动空轮询或访问旧地址。
+            if (!mVarListExt.Any(item => item.isSelected && item.resolved))
+            {
+                MessageBox.Show("当前没有已匹配的在线变量！");
+                return;
+            }
+
             switch (mReadType)
             {
                 case ReadType.READ_SINGLE:
@@ -262,7 +412,7 @@ namespace PcDebuger
             for(byte i = 0; i < mVarListExt.Count; i++) // (var item in mVarListExt)
             {
                 var item = mVarListExt[i];
-                if (item.isSelected)
+                if (item.isSelected && item.resolved)
                 {
                     byte[] cmd = VarDebugOnlineMakeSetAddrCmd(item, i);
                     LogMsg(cmd, true);
@@ -275,42 +425,21 @@ namespace PcDebuger
         {
             mVarListExt.Clear();
             UpdateVarSelectWin();
+            RefreshResidentVarList();
+            SaveVarDebugOnlineConfig();
         }
 
         private void UpdateVarListFromUi()
         {
-            mVarListExt.Clear();
-            foreach (DataGridViewRow row in dataGridView1.Rows)
-            {
-                if (row.Cells[0].Value == null || row.Cells[1].Value == null || row.Cells[2].Value == null || row.Cells[3].Value == null)
-                {
-                    break;
-                }
-                VarOnlineExtend varRow = new VarOnlineExtend();
-                varRow.isSelected = true;
-                if (varRow.isSelected)
-                {
-                    varRow.name = row.Cells[0].Value.ToString();
-                    varRow.addr = row.Cells[1].Value.ToString();
-                    varRow.type = row.Cells[2].Value.ToString();
-                    varRow.rdValue = row.Cells[3].Value.ToString();
-                    varRow.wrValue = row.Cells[4].Value.ToString();
-                    DataGridViewCheckBoxCell checkboxCell = dataGridView1.CurrentRow.Cells[5] as DataGridViewCheckBoxCell;
-                    if (checkboxCell.Value.Equals(true))
-                    {
-                        varRow.isNeedWrite = true;
-                    }
-                    else
-                    {
-                        varRow.isNeedWrite = false;
-                    }
-                    mVarListExt.Add(varRow);
-                }
-            }
+            // 不再清空并重建模型，否则会丢失ELF大小、原始类型和匹配状态。
+            SyncVarListFromGrid();
+
             if (mVarListExt.Count == 0)
             {
                 MessageBox.Show("没有任何变量！");
             }
+
+            SaveVarDebugOnlineConfig();
         }
 
         private byte VarDebugOnlineGetVarType(string type)
@@ -392,7 +521,7 @@ namespace PcDebuger
         private byte[] VarDebugOnlineMakeSetAddrCmd(VarOnlineExtend item, byte channel)
         {
             List<byte> sendList = new List<byte>();
-            if(channel >= 32) {
+            if(channel >= 32 || item == null || !item.resolved) {
                 return null;
             }
 
@@ -423,7 +552,7 @@ namespace PcDebuger
         private byte[] VarDebugOnlineMakeWriteCmd(VarOnlineExtend item, byte channel)
         {
             List<byte> sendList = new List<byte>();
-            if (channel >= 32)
+            if (channel >= 32 || item == null || !item.resolved)
             {
                 return null;
             }
@@ -457,7 +586,7 @@ namespace PcDebuger
         private byte[] VarDebugOnlineMakeReadCmd(VarOnlineExtend item, byte channel)
         {
             List<byte> sendList = new List<byte>();
-            if (channel >= 32)
+            if (channel >= 32 || item == null || !item.resolved)
             {
                 return null;
             }
@@ -491,7 +620,7 @@ namespace PcDebuger
             for(byte i = 0; i < mVarListExt.Count; i++)
             {
                 var item = mVarListExt[i];
-                if (item.isSelected)
+                if (item.isSelected && item.resolved)
                 {
                     byte[] cmd = VarDebugOnlineMakeReadCmd(item, i);
                     CommSendCmd(cmd);
@@ -517,67 +646,35 @@ namespace PcDebuger
 
         void btnOpenMap_Click(object sender, EventArgs e)
         {
-            // 创建文件选择窗口。
-            OpenFileDialog dialog = new OpenFileDialog();
+            // 使用目录选择器直接选择CubeIDE生成的Debug构建目录。
+            FolderBrowserDialog dialog = new FolderBrowserDialog();
+            dialog.Description =
+                "请选择包含STM32 ELF和MAP文件的Debug目录";
+            dialog.ShowNewFolderButton = false;
 
-            // 允许同时选择同一固件生成的MAP和ELF文件。
-            dialog.Multiselect = true;
-
-            // 提示用户选择MAP或ELF文件。
-            dialog.Title = "请选择MAP或ELF文件";
-
-            // 当前功能只支持MAP和ELF，不额外加入AXF格式。
-            dialog.Filter = "调试文件(*.map;*.elf)|*.map;*.elf|MAP文件(*.map)|*.map|ELF文件(*.elf)|*.elf";
-
-            // 只有用户确认选择后才开始解析。
-            if (dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
+            // 再次打开时从当前目录开始，减少重复定位操作。
+            if (!string.IsNullOrEmpty(mDebugDirectory) &&
+                Directory.Exists(mDebugDirectory))
             {
-                try
-                {
-                    // 展开用户选择，并自动补充同名的MAP或ELF伴随文件。
-                    string[] debugFiles = GetDebugFileList(dialog.FileNames);
-
-                    // 同时解析MAP和ELF，并按变量名称与地址合并结果。
-                    string warning;
-                    List<VarOnline> varList = AnalysisDebugFiles(debugFiles, out warning);
-
-                    // 某个ELF的DWARF解析失败时，先显示对应的回退原因。
-                    if (!string.IsNullOrEmpty(warning))
-                    {
-                        MessageBox.Show(
-                            warning,
-                            "ELF解析提示",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Warning);
-                    }
-
-                    // 显示本次实际加载的全部调试文件名称。
-                    textBoxMapDir.Text = string.Join("; ",
-                        debugFiles.Select(item => Path.GetFileName(item)).ToArray());
-
-                    // 使用新的变量列表替换旧列表。
-                    mVarList = varList;
-
-                    // 文件切换后清除之前选中的变量。
-                    mVarListExt.Clear();
-
-                    // 打开变量选择窗口，并加入本次选中的变量。
-                    mVarListExt.AddRange(GetVarList(mVarList));
-
-                    // 刷新在线变量表格。
-                    UpdateVarSelectWin();
-
-                }
-                catch (Exception ex)
-                {
-                    // 将文件格式或读取错误显示给用户，避免程序直接退出。
-                    MessageBox.Show(
-                        "解析调试文件失败！\r\n" + ex.Message,
-                        "文件解析",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
-                }
+                dialog.SelectedPath = mDebugDirectory;
             }
+
+            if (dialog.ShowDialog() != DialogResult.OK)
+            {
+                return;
+            }
+
+            // 切换目录后清除旧文件签名，强制重新解析最新ELF。
+            mDebugDirectory = Path.GetFullPath(dialog.SelectedPath);
+            mLoadedDebugImagePath = string.Empty;
+            mLoadedDebugImageWriteTimeUtc = DateTime.MinValue;
+            mLoadedDebugImageLength = 0;
+            textBoxMapDir.Text = mDebugDirectory;
+
+            // 目录选择立即持久化，并启动两秒自动更新检查。
+            SaveVarDebugOnlineConfig();
+            ConfigureDebugDirectoryWatcher();
+            StartDebugDirectoryScan(true);
         }
 
         private List<VarOnline> AnalysisDebugFile(string path)
@@ -927,7 +1024,9 @@ namespace PcDebuger
 
                     // 2. 给每一列赋值
                     newRow.Cells[0].Value = va.name;
-                    newRow.Cells[1].Value = va.addr;
+                    newRow.Cells[1].Value = va.resolved
+                        ? va.addr
+                        : "待匹配";
 
                     var comboColumn = dataGridView1.Columns[2] as DataGridViewComboBoxColumn;
                     if (comboColumn != null && !comboColumn.Items.Contains(va.type))
@@ -936,9 +1035,21 @@ namespace PcDebuger
                     }
 
                     newRow.Cells[2].Value = va.type;
-                    newRow.Cells[3].Value = va.rdValue;
-                    newRow.Cells[4].Value = va.wrValue;
+                    newRow.Cells[3].Value = va.resolved
+                        ? va.rdValue
+                        : "变量未匹配";
+                    newRow.Cells[4].Value = va.wrValue ?? "0";
                     newRow.Cells[5].Value = va.isNeedWrite;
+
+                    // 未在当前ELF中严格匹配的变量使用浅红色提示，并禁止旧地址读写。
+                    if (!va.resolved)
+                    {
+                        newRow.DefaultCellStyle.BackColor =
+                            System.Drawing.Color.MistyRose;
+                        newRow.Cells[1].ReadOnly = true;
+                        newRow.Cells[4].ReadOnly = true;
+                        newRow.Cells[5].ReadOnly = true;
+                    }
 
                     // 3. 最后把这行添加到网格
                     dataGridView1.Rows.Add(newRow);
@@ -947,7 +1058,9 @@ namespace PcDebuger
                     //CommSendCmd(cmd);
                 }
             }
-            
+
+            // 右侧添加状态变化后同步刷新左侧“+ / ✓”标记。
+            RefreshResidentVarList();
         }
 
         public void UpdateVarListCombox()
@@ -990,6 +1103,7 @@ namespace PcDebuger
 
             int rowIndex = dataGridView1.CurrentCell.RowIndex;
             mVarListExt[rowIndex].type = selectedVarType;
+            SaveVarDebugOnlineConfig();
         }
 
         private void ClearDataGridView()

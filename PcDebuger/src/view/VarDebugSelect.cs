@@ -473,6 +473,13 @@ namespace PcDebuger
                     ? "Uint16"
                     : selectedVar.type;
 
+                // 保存调试文件中的原始类型和大小，供工作区恢复后严格重新匹配。
+                varRow.debugType = selectedVar.type;
+                varRow.size = selectedVar.size;
+
+                // 当前变量刚从本次解析结果选择，因此地址已经匹配。
+                varRow.resolved = true;
+
                 // 初始化读写值。
                 varRow.wrValue = "0";
                 varRow.rdValue = "0";

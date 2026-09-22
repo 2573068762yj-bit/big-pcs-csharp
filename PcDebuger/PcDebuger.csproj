@@ -103,6 +103,7 @@
     <Compile Include="src\view\VarDebugOnline.cs">
       <SubType>Form</SubType>
     </Compile>
+    <Compile Include="src\view\VarDebugWorkspace.cs" />
     <Compile Include="src\view\SwOscView.cs">
       <SubType>Form</SubType>
     </Compile>
